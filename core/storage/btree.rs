@@ -133,13 +133,13 @@ impl CursorState {
     }
 }
 
-pub struct BTreeCursor {
+pub struct BTreeCursor<'a> {
     pager: Rc<Pager>,
     /// Page id of the root page used to go back up fast.
     root_page: usize,
     /// Rowid and record are stored before being consumed.
     rowid: RefCell<Option<u64>>,
-    record: RefCell<Option<Record>>,
+    record: RefCell<Option<Record<'a>>>,
     null_flag: bool,
     /// Index internal pages are consumed on the way up, so we store going upwards flag in case
     /// we just moved to a parent page and the parent page is an internal index page which requires
@@ -170,7 +170,7 @@ struct PageStack {
     cell_indices: RefCell<[i32; BTCURSOR_MAX_DEPTH + 1]>,
 }
 
-impl BTreeCursor {
+impl BTreeCursor<'_> {
     pub fn new(pager: Rc<Pager>, root_page: usize) -> Self {
         Self {
             pager,
@@ -265,10 +265,11 @@ impl BTreeCursor {
                     continue;
                 }
                 BTreeCell::TableLeafCell(TableLeafCell {
-                    _rowid, _payload, ..
+                    _rowid, ref _payload, ..
                 }) => {
+                    // TODO PIN LEAF HERE
                     self.stack.retreat();
-                    let record: Record = crate::storage::sqlite3_ondisk::read_record(&_payload)?;
+                    let record: Record = crate::storage::sqlite3_ondisk::read_record(_payload)?;
                     return Ok(CursorResult::Ok((Some(_rowid), Some(record))));
                 }
                 BTreeCell::IndexInteriorCell(_) => todo!(),

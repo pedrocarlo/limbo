@@ -46,7 +46,7 @@ use crate::io::{Buffer, Completion, ReadCompletion, SyncCompletion, WriteComplet
 use crate::storage::buffer_pool::BufferPool;
 use crate::storage::database::DatabaseStorage;
 use crate::storage::pager::Pager;
-use crate::types::{OwnedValue, Record, Text, TextSubtype};
+use crate::types::{Bytes, OwnedValue, Record, Text, TextSubtype};
 use crate::{File, Result};
 use log::trace;
 use parking_lot::RwLock;
@@ -972,7 +972,10 @@ pub fn read_record(payload: &[u8]) -> Result<Record> {
     Ok(Record::new(values))
 }
 
-pub fn read_value(buf: &[u8], serial_type: &SerialType) -> Result<(OwnedValue, usize)> {
+pub fn read_value<'a, 'b>(
+    buf: &'a [u8],
+    serial_type: &'b SerialType,
+) -> Result<(OwnedValue<'a>, usize)> {
     match *serial_type {
         SerialType::Null => Ok((OwnedValue::Null, 0)),
         SerialType::Int8 => {
@@ -1058,10 +1061,10 @@ pub fn read_value(buf: &[u8], serial_type: &SerialType) -> Result<(OwnedValue, u
                     n
                 );
             }
-            let bytes = buf[0..n].to_vec();
+            let bytes = &buf[0..n];
             Ok((
                 OwnedValue::Text(Text {
-                    value: Rc::new(bytes),
+                    value: Bytes::Borrowed(bytes),
                     subtype: TextSubtype::Text,
                 }),
                 n,
@@ -1420,7 +1423,7 @@ mod tests {
     #[case(&[], SerialType::ConstInt0, OwnedValue::Integer(0))]
     #[case(&[], SerialType::ConstInt1, OwnedValue::Integer(1))]
     #[case(&[1, 2, 3], SerialType::Blob(3), OwnedValue::Blob(vec![1, 2, 3].into()))]
-    #[case(&[65, 66, 67], SerialType::String(3), OwnedValue::build_text("ABC"))]
+    #[case(&[65, 66, 67], SerialType::String(3), OwnedValue::build_text_borrowed("ABC"))]
     fn test_read_value(
         #[case] buf: &[u8],
         #[case] serial_type: SerialType,

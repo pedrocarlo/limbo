@@ -9,7 +9,9 @@ use crate::vdbe::sorter::Sorter;
 use crate::vdbe::VTabOpaqueCursor;
 use crate::Result;
 use std::fmt::Display;
+use std::ops::Deref;
 use std::rc::Rc;
+use std::slice::Iter;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value<'a> {
@@ -43,55 +45,89 @@ pub enum OwnedValueType {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum Bytes<'a> {
+    Owned(Vec<u8>),
+    Borrowed(&'a [u8]),
+}
+
+impl Deref for Bytes<'_> {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Bytes::Owned(items) => items,
+            Bytes::Borrowed(items) => items,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum TextSubtype {
     Text,
     Json,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Text {
-    pub value: Rc<Vec<u8>>,
+pub struct Text<'a> {
+    pub value: Bytes<'a>,
     pub subtype: TextSubtype,
 }
 
-impl Text {
+impl<'a> Text<'a> {
     pub fn from_str<S: Into<String>>(value: S) -> Self {
-        Self::new(&value.into())
+        Self::new(value.into())
     }
 
-    pub fn new(value: &str) -> Self {
+    pub fn new(value: String) -> Self {
         Self {
-            value: Rc::new(value.as_bytes().to_vec()),
+            value: Bytes::Owned(value.as_bytes().to_vec()),
+            subtype: TextSubtype::Text,
+        }
+    }
+
+    pub fn new_borrowed(value: &'a str) -> Self {
+        Self {
+            value: Bytes::Borrowed(value.as_bytes()),
             subtype: TextSubtype::Text,
         }
     }
 
     pub fn json(value: &str) -> Self {
         Self {
-            value: Rc::new(value.as_bytes().to_vec()),
+            value: Bytes::Owned(value.as_bytes().to_vec()),
             subtype: TextSubtype::Json,
         }
     }
 
     pub fn as_str(&self) -> &str {
-        unsafe { std::str::from_utf8_unchecked(self.value.as_ref()) }
+        unsafe {
+            match self.value {
+                Bytes::Owned(ref v) => std::str::from_utf8_unchecked(v),
+                Bytes::Borrowed(v) => std::str::from_utf8_unchecked(v),
+            }
+        }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum OwnedValue {
+pub enum OwnedValue<'a> {
     Null,
     Integer(i64),
     Float(f64),
-    Text(Text),
+    Text(Text<'a>),
     Blob(Rc<Vec<u8>>),
-    Agg(Box<AggContext>), // TODO(pere): make this without Box. Currently this might cause cache miss but let's leave it for future analysis
-    Record(Record),
+    Agg(Box<AggContext<'a>>), // TODO(pere): make this without Box. Currently this might cause cache miss but let's leave it for future analysis
+    Record(Record<'a>),
 }
 
-impl OwnedValue {
+impl<'a> OwnedValue<'a> {
     // A helper function that makes building a text OwnedValue easier.
-    pub fn build_text(text: &str) -> Self {
+    pub fn build_text_borrowed(text: &'a str) -> Self {
+        Self::Text(Text::new_borrowed(text))
+    }
+
+    // A helper function that makes building a text OwnedValue easier.
+    pub fn build_text(text: String) -> Self {
         Self::Text(Text::new(text))
     }
 
@@ -113,8 +149,12 @@ impl OwnedValue {
         }
     }
 
-    pub fn from_text(text: &str) -> Self {
+    pub fn from_text(text: String) -> Self {
         OwnedValue::Text(Text::new(text))
+    }
+
+    pub fn from_text_borrowed(text: &'a str) -> Self {
+        OwnedValue::Text(Text::new_borrowed(text))
     }
 
     pub fn value_type(&self) -> OwnedValueType {
@@ -171,22 +211,22 @@ impl OwnedValue {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ExternalAggState {
+pub struct ExternalAggState<'a> {
     pub state: *mut AggCtx,
     pub argc: usize,
     pub step_fn: StepFunction,
     pub finalize_fn: FinalizeFunction,
-    pub finalized_value: Option<OwnedValue>,
+    pub finalized_value: Option<OwnedValue<'a>>,
 }
 
-impl ExternalAggState {
-    pub fn cache_final_value(&mut self, value: OwnedValue) -> &OwnedValue {
+impl<'a> ExternalAggState<'a> {
+    pub fn cache_final_value(&mut self, value: OwnedValue<'a>) -> &OwnedValue {
         self.finalized_value = Some(value);
         self.finalized_value.as_ref().unwrap()
     }
 }
 
-impl Display for OwnedValue {
+impl Display for OwnedValue<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Null => write!(f, "NULL"),
@@ -210,7 +250,7 @@ impl Display for OwnedValue {
     }
 }
 
-impl OwnedValue {
+impl<'a> OwnedValue<'a> {
     pub fn to_ffi(&self) -> ExtValue {
         match self {
             Self::Null => ExtValue::null(),
@@ -242,7 +282,7 @@ impl OwnedValue {
                 let Some(text) = v.to_text() else {
                     return Ok(OwnedValue::Null);
                 };
-                Ok(OwnedValue::build_text(text))
+                Ok(OwnedValue::build_text(text.to_string()))
             }
             ExtValueType::Blob => {
                 let Some(blob) = v.to_blob() else {
@@ -264,24 +304,25 @@ impl OwnedValue {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum AggContext {
-    Avg(OwnedValue, OwnedValue), // acc and count
-    Sum(OwnedValue),
-    Count(OwnedValue),
-    Max(Option<OwnedValue>),
-    Min(Option<OwnedValue>),
-    GroupConcat(OwnedValue),
-    External(ExternalAggState),
+pub enum AggContext<'a> {
+    Avg(OwnedValue<'a>, OwnedValue<'a>), // acc and count
+    Sum(OwnedValue<'a>),
+    Count(OwnedValue<'a>),
+    Max(Option<OwnedValue<'a>>),
+    Min(Option<OwnedValue<'a>>),
+    GroupConcat(OwnedValue<'a>),
+    External(ExternalAggState<'a>),
 }
 
 const NULL: OwnedValue = OwnedValue::Null;
 
-impl AggContext {
+impl AggContext<'_> {
     pub fn compute_external(&mut self) -> Result<()> {
         if let Self::External(ext_state) = self {
             if ext_state.finalized_value.is_none() {
                 let final_value = unsafe { (ext_state.finalize_fn)(ext_state.state) };
-                ext_state.cache_final_value(OwnedValue::from_ffi(&final_value)?);
+                let owned_value = OwnedValue::from_ffi(&final_value)?;
+                ext_state.cache_final_value(owned_value);
                 unsafe { final_value.free() };
             }
         }
@@ -302,7 +343,7 @@ impl AggContext {
 }
 
 #[allow(clippy::non_canonical_partial_ord_impl)]
-impl PartialOrd<OwnedValue> for OwnedValue {
+impl<'a> PartialOrd<OwnedValue<'a>> for OwnedValue<'a> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         match (self, other) {
             (Self::Integer(int_left), Self::Integer(int_right)) => int_left.partial_cmp(int_right),
@@ -342,8 +383,8 @@ impl PartialOrd<OwnedValue> for OwnedValue {
     }
 }
 
-impl PartialOrd<AggContext> for AggContext {
-    fn partial_cmp(&self, other: &AggContext) -> Option<std::cmp::Ordering> {
+impl<'a> PartialOrd<AggContext<'a>> for AggContext<'a> {
+    fn partial_cmp(&self, other: &AggContext<'a>) -> Option<std::cmp::Ordering> {
         match (self, other) {
             (Self::Avg(a, _), Self::Avg(b, _)) => a.partial_cmp(b),
             (Self::Sum(a), Self::Sum(b)) => a.partial_cmp(b),
@@ -356,16 +397,16 @@ impl PartialOrd<AggContext> for AggContext {
     }
 }
 
-impl Eq for OwnedValue {}
+impl Eq for OwnedValue<'_> {}
 
-impl Ord for OwnedValue {
+impl Ord for OwnedValue<'_> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.partial_cmp(other).unwrap()
     }
 }
 
-impl std::ops::Add<OwnedValue> for OwnedValue {
-    type Output = OwnedValue;
+impl<'a> std::ops::Add<OwnedValue<'a>> for OwnedValue<'a> {
+    type Output = OwnedValue<'a>;
 
     fn add(self, rhs: Self) -> Self::Output {
         match (self, rhs) {
@@ -382,21 +423,21 @@ impl std::ops::Add<OwnedValue> for OwnedValue {
                 Self::Float(float_left + float_right)
             }
             (Self::Text(string_left), Self::Text(string_right)) => {
-                Self::build_text(&(string_left.as_str().to_string() + string_right.as_str()))
+                Self::build_text(string_left.as_str().to_string() + string_right.as_str())
             }
             (Self::Text(string_left), Self::Integer(int_right)) => {
-                Self::build_text(&(string_left.as_str().to_string() + &int_right.to_string()))
+                Self::build_text(string_left.as_str().to_string() + &int_right.to_string())
             }
             (Self::Integer(int_left), Self::Text(string_right)) => {
-                Self::build_text(&(int_left.to_string() + string_right.as_str()))
+                Self::build_text(int_left.to_string() + string_right.as_str())
             }
             (Self::Text(string_left), Self::Float(float_right)) => {
                 let string_right = Self::Float(float_right).to_string();
-                Self::build_text(&(string_left.as_str().to_string() + &string_right))
+                Self::build_text(string_left.as_str().to_string() + &string_right)
             }
             (Self::Float(float_left), Self::Text(string_right)) => {
                 let string_left = Self::Float(float_left).to_string();
-                Self::build_text(&(string_left + string_right.as_str()))
+                Self::build_text(string_left + string_right.as_str())
             }
             (lhs, Self::Null) => lhs,
             (Self::Null, rhs) => rhs,
@@ -405,8 +446,8 @@ impl std::ops::Add<OwnedValue> for OwnedValue {
     }
 }
 
-impl std::ops::Add<f64> for OwnedValue {
-    type Output = OwnedValue;
+impl<'a> std::ops::Add<f64> for OwnedValue<'a> {
+    type Output = OwnedValue<'a>;
 
     fn add(self, rhs: f64) -> Self::Output {
         match self {
@@ -417,8 +458,8 @@ impl std::ops::Add<f64> for OwnedValue {
     }
 }
 
-impl std::ops::Add<i64> for OwnedValue {
-    type Output = OwnedValue;
+impl<'a> std::ops::Add<i64> for OwnedValue<'a> {
+    type Output = OwnedValue<'a>;
 
     fn add(self, rhs: i64) -> Self::Output {
         match self {
@@ -429,28 +470,28 @@ impl std::ops::Add<i64> for OwnedValue {
     }
 }
 
-impl std::ops::AddAssign for OwnedValue {
+impl<'a> std::ops::AddAssign for OwnedValue<'a> {
     fn add_assign(&mut self, rhs: Self) {
         *self = self.clone() + rhs;
     }
 }
 
-impl std::ops::AddAssign<i64> for OwnedValue {
+impl<'a> std::ops::AddAssign<i64> for OwnedValue<'a> {
     fn add_assign(&mut self, rhs: i64) {
         *self = self.clone() + rhs;
     }
 }
 
-impl std::ops::AddAssign<f64> for OwnedValue {
+impl<'a> std::ops::AddAssign<f64> for OwnedValue<'a> {
     fn add_assign(&mut self, rhs: f64) {
         *self = self.clone() + rhs;
     }
 }
 
-impl std::ops::Div<OwnedValue> for OwnedValue {
-    type Output = OwnedValue;
+impl<'a> std::ops::Div<OwnedValue<'a>> for OwnedValue<'a> {
+    type Output = OwnedValue<'a>;
 
-    fn div(self, rhs: OwnedValue) -> Self::Output {
+    fn div(self, rhs: OwnedValue<'a>) -> Self::Output {
         match (self, rhs) {
             (Self::Integer(int_left), Self::Integer(int_right)) => {
                 Self::Integer(int_left / int_right)
@@ -469,13 +510,13 @@ impl std::ops::Div<OwnedValue> for OwnedValue {
     }
 }
 
-impl std::ops::DivAssign<OwnedValue> for OwnedValue {
-    fn div_assign(&mut self, rhs: OwnedValue) {
+impl<'a> std::ops::DivAssign<OwnedValue<'a>> for OwnedValue<'a> {
+    fn div_assign(&mut self, rhs: OwnedValue<'a>) {
         *self = self.clone() / rhs;
     }
 }
 
-impl From<Value<'_>> for OwnedValue {
+impl<'a> From<Value<'_>> for OwnedValue<'a> {
     fn from(value: Value<'_>) -> Self {
         match value {
             Value::Null => OwnedValue::Null,
@@ -521,11 +562,11 @@ impl<'a> FromValue<'a> for &'a str {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Record {
-    pub values: Vec<OwnedValue>,
+pub struct Record<'a> {
+    pub values: Vec<OwnedValue<'a>>,
 }
 
-impl Record {
+impl Record<'_> {
     pub fn get<'a, T: FromValue<'a> + 'a>(&'a self, idx: usize) -> Result<T> {
         let value = &self.values[idx];
         T::from_value(value)
@@ -563,7 +604,7 @@ enum SerialType {
     Blob { content_size: usize },
 }
 
-impl From<&OwnedValue> for SerialType {
+impl<'a> From<&OwnedValue<'a>> for SerialType {
     fn from(value: &OwnedValue) -> Self {
         match value {
             OwnedValue::Null => SerialType::Null,
@@ -605,8 +646,8 @@ impl From<SerialType> for u64 {
     }
 }
 
-impl Record {
-    pub fn new(values: Vec<OwnedValue>) -> Self {
+impl<'a> Record<'a> {
+    pub fn new(values: Vec<OwnedValue<'a>>) -> Self {
         Self { values }
     }
 
@@ -742,7 +783,7 @@ pub enum SeekOp {
 #[derive(Clone, PartialEq, Debug)]
 pub enum SeekKey<'a> {
     TableRowId(u64),
-    IndexKey(&'a Record),
+    IndexKey(&'a Record<'a>),
 }
 
 #[cfg(test)]
@@ -865,7 +906,7 @@ mod tests {
     #[test]
     fn test_serialize_text() {
         let text = "hello";
-        let record = Record::new(vec![OwnedValue::Text(Text::new(text))]);
+        let record = Record::new(vec![OwnedValue::build_text_borrowed(text)]);
         let mut buf = Vec::new();
         record.serialize(&mut buf);
 
@@ -907,7 +948,7 @@ mod tests {
             OwnedValue::Null,
             OwnedValue::Integer(42),
             OwnedValue::Float(3.15),
-            OwnedValue::Text(Text::new(text)),
+            OwnedValue::build_text_borrowed(text),
         ]);
         let mut buf = Vec::new();
         record.serialize(&mut buf);
