@@ -4,6 +4,7 @@ mod helper;
 mod import;
 mod input;
 mod opcodes_dictionary;
+mod config;
 
 use rustyline::{error::ReadlineError, Config, Editor};
 use std::sync::atomic::Ordering;
