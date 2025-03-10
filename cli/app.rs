@@ -22,7 +22,6 @@ use std::{
     },
 };
 
-
 #[derive(Parser)]
 #[command(name = "limbo")]
 #[command(author, version, about, long_about = None)]
@@ -234,7 +233,7 @@ impl<'a> Limbo<'a> {
             )
         };
         let conn = db.connect()?;
-        let h = LimboHelper::new(conn.clone(), io.clone());
+        let h = LimboHelper::new(conn.clone(), io.clone(), config.syntax_highlight.clone());
         rl.set_helper(Some(h));
         let interrupt_count = Arc::new(AtomicUsize::new(0));
         {
