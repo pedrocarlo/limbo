@@ -5,7 +5,7 @@ use crate::{
     input::{get_io, get_writer, DbLocation, OutputMode, Settings, HELP_MSG},
     opcodes_dictionary::OPCODE_DESCRIPTIONS,
 };
-use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Row, Table};
+use comfy_table::{Attribute, Cell, CellAlignment, ContentArrangement, Row, Table};
 use limbo_core::{Database, LimboError, OwnedValue, Statement, StepResult};
 
 use clap::{Parser, ValueEnum};
@@ -21,6 +21,7 @@ use std::{
         Arc,
     },
 };
+
 
 #[derive(Parser)]
 #[command(name = "limbo")]
@@ -201,8 +202,6 @@ macro_rules! query_internal {
         Ok::<(), LimboError>(())
     }};
 }
-
-static COLORS: &[Color] = &[Color::Green, Color::Black, Color::Grey];
 
 impl<'a> Limbo<'a> {
     pub fn new(
