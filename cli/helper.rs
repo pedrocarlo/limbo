@@ -13,6 +13,8 @@ use syntect::highlighting::ThemeSet;
 use syntect::parsing::{Scope, SyntaxSet};
 use syntect::util::{as_24_bit_terminal_escaped, LinesWithEndings};
 
+use crate::config::{SyntaxHighlightConfig, CONFIG_DIR};
+
 macro_rules! try_result {
     ($expr:expr, $err:expr) => {
         match $expr {
@@ -28,23 +30,35 @@ pub struct LimboHelper {
     completer: SqlCompleter,
     syntax_set: SyntaxSet,
     theme_set: ThemeSet,
+    syntax_config: SyntaxHighlightConfig,
     #[rustyline(Hinter)]
     hinter: HistoryHinter,
 }
 
 impl LimboHelper {
-    pub fn new(conn: Rc<Connection>, io: Arc<dyn limbo_core::IO>) -> Self {
+    pub fn new(
+        conn: Rc<Connection>,
+        io: Arc<dyn limbo_core::IO>,
+        syntax_config: SyntaxHighlightConfig,
+    ) -> Self {
         // Load only predefined syntax
         let ps = from_uncompressed_data(include_bytes!(concat!(
             env!("OUT_DIR"),
             "/SQL_syntax_set_dump.packdump"
         )))
         .unwrap();
-        let ts = ThemeSet::load_defaults();
+        let mut ts = ThemeSet::load_defaults();
+        let theme_dir = CONFIG_DIR.join("themes");
+        if theme_dir.exists() {
+            if let Err(err) = ts.add_from_folder(theme_dir) {
+                tracing::error!("{err}");
+            }
+        }
         LimboHelper {
             completer: SqlCompleter::new(conn, io),
             syntax_set: ps,
             theme_set: ts,
+            syntax_config,
             hinter: HistoryHinter::new(),
         }
     }
@@ -58,7 +72,12 @@ impl Highlighter for LimboHelper {
             .syntax_set
             .find_syntax_by_scope(Scope::new("source.sql").unwrap())
             .unwrap();
-        let mut h = HighlightLines::new(syntax, &self.theme_set.themes["base16-ocean.dark"]);
+        let theme = self
+            .theme_set
+            .themes
+            .get(&self.syntax_config.theme_name)
+            .unwrap_or(&self.theme_set.themes["base16-ocean.dark"]);
+        let mut h = HighlightLines::new(syntax, theme);
         let ranges = {
             let mut ret_ranges = Vec::new();
             for new_line in LinesWithEndings::from(line) {
@@ -69,7 +88,7 @@ impl Highlighter for LimboHelper {
             ret_ranges
         };
         let mut ret_line = as_24_bit_terminal_escaped(&ranges[..], false);
-        // Push this escape sequence to reset color modes at the end of the string
+        // Push this escape sequence to reset terminal color modes at the end of the string
         ret_line.push_str("\x1b[0m");
         std::borrow::Cow::Owned(ret_line)
     }
